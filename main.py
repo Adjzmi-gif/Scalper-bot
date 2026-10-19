@@ -6,82 +6,117 @@ from flask import Flask
 from dotenv import load_dotenv
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import yfinance as yf
-import ccxt
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-client = OpenAI(api_key=OPENAI_KEY)
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Mini Web Server untuk menjaga Render Free tetap aktif 24/7
+# Mini Web Server untuk menjaga Railway / Render tetap aktif
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
 def home():
-    return "Bot Scalper V4 is Alive and Running!"
+    return "Bot Scalper V4 (Pure Technical) is Alive and Running!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
 
-SYSTEM_PROMPT_V4 = """
-Bertindaklah sebagai Senior Institutional Scalper, Order Flow Specialist, & Quantitative Risk Engine Bot.
-Tugas utamamu adalah menganalisis data pasar otomatis secara ketat (Volume Profile, Delta Imbalance, & Net R:R Check).
-Jika kondisi pasar Sideways, Spread Lebar, atau Net R:R < 1:1.5, KELUARKAN KEPUTUSAN: 🟡 WAIT (NO TRADE CLEAR).
+def fetch_market_data():
+    market_summary = []
+    # Menggunakan Yahoo Finance untuk semua Aset (Crypto, Forex, Emas) agar lolos blokir IP US
+    assets = {
+        "BTC/USDT": "BTC-USD",
+        "ETH/USDT": "ETH-USD",
+        "XAUUSD (Gold)": "GC=F",
+        "EURUSD": "EURUSD=X"
+    }
 
-Format Respons Wajib Bot Telegram:
----
-### 🟢/🔴/🟡 [PILIH: BUY / SELL / WAIT] - {ticker_symbol}
+    for name, symbol in assets.items():
+        try:
+            data = yf.Ticker(symbol).history(period="1d", interval="5m")
+            if not data.empty and len(data) >= 20:
+                # Perhitungan Sederhana EMA 9 dan EMA 21
+                data['EMA9'] = data['Close'].ewm(span=9, adjust=False).mean()
+                data['EMA21'] = data['Close'].ewm(span=21, adjust=False).mean()
+                
+                latest = data.iloc[-1]
+                prev = data.iloc[-2]
+                
+                market_summary.append({
+                    "symbol": name,
+                    "price": round(latest['Close'], 2 if "USD" in name or "Gold" in name else 4),
+                    "high": round(latest['High'], 2),
+                    "low": round(latest['Low'], 2),
+                    "ema9": latest['EMA9'],
+                    "ema21": latest['EMA21'],
+                    "prev_ema9": prev['EMA9'],
+                    "prev_ema21": prev['EMA21'],
+                })
+        except Exception as e:
+            print(f"Error fetching {name}: {e}")
+
+    return market_summary
+
+def generate_technical_signal(asset, time_stamp):
+    price = asset['price']
+    ema9 = asset['ema9']
+    ema21 = asset['ema21']
+    prev_ema9 = asset['prev_ema9']
+    prev_ema21 = asset['prev_ema21']
+    
+    # Logika Indikator Crossover EMA (Bullish / Bearish)
+    if prev_ema9 <= prev_ema21 and ema9 > ema21:
+        action = "BUY"
+        icon = "🟢"
+        entry_area = f"{price} - {round(price * 0.999, 2)}"
+        tp1 = round(price * 1.003, 2)
+        tp2 = round(price * 1.006, 2)
+        sl = round(price * 0.997, 2)
+    elif prev_ema9 >= prev_ema21 and ema9 < ema21:
+        action = "SELL"
+        icon = "🔴"
+        entry_area = f"{price} - {round(price * 1.001, 2)}"
+        tp1 = round(price * 0.997, 2)
+        tp2 = round(price * 0.994, 2)
+        sl = round(price * 1.003, 2)
+    else:
+        action = "WAIT"
+        icon = "🟡"
+
+    if action == "WAIT":
+        return f"""
+### 🟡 WAIT (NO TRADE CLEAR) - {asset['symbol']}
+*Waktu Rilis Sinyal: {time_stamp} WIB*
+*Status: Pasaran Konsolidasi / Belum Ada Momentum Crossover EMA.*
+"""
+
+    return f"""
+### {icon} {action} - {asset['symbol']}
 *Waktu Rilis Sinyal: {time_stamp} WIB*
 *Status Sinyal: 🟢 VALID (Kadaluarsa Otomatis dalam 3 Menit)*
 
-1. ZONA EKSEKUSI & NET RISK-REWARD (POST-FEE):
-   • Entry Area         : [Angka Presisi / Rentang]
-   • Max Slippage Price : [Batas Harga Maksimal Entry]
-   • Take Profit 1      : [Angka] (Quick Scalp - Net R:R min 1:1.5)
-   • Take Profit 2      : [Angka] (Extended Target - Net R:R 1:2.5+)
-   • Stop Loss (SL)     : [Angka Presisi] (Strict: Max 1-2% ATR Volatility)
+1. ZONA EKSEKUSI & NET RISK-REWARD:
+   • Entry Area         : {entry_area}
+   • Take Profit 1      : {tp1} (Quick Scalp)
+   • Take Profit 2      : {tp2} (Extended Target)
+   • Stop Loss (SL)     : {sl} (Strict Risk)
 
 2. LOT CALCULATOR & RISK MANAGEMENT:
-   • Modal $100 - $500   : Rekomendasi [0.01 - 0.02 Lot / 1-2% Equity Crypto]
-   • Modal $1.000       : Rekomendasi [0.05 Lot / 5% Equity Crypto]
+   • Modal $100 - $500   : Rekomendasi 0.01 - 0.02 Lot / 1-2% Equity
+   • Modal $1.000       : Rekomendasi 0.05 Lot / 5% Equity
 
 3. TEMPORAL WINDOW & TIME INVALIDATION:
-   • Max Hold Duration  : [10 - 25 Menit]
+   • Max Hold Duration  : 10 - 25 Menit
    • Time-Out Action    : "Jika dalam 15 menit TP1 tidak tersentuh, EXIT MANUAL/BEP."
 
 4. AMBANG BATAS BATAL (INVALIDATION RULE):
    • "Sinyal BATAL jika dibaca >3 menit sejak waktu rilis di atas."
----
 """
-
-def fetch_market_data():
-    market_summary = []
-    try:
-        exchange = ccxt.binance()
-        for sym in ['BTC/USDT', 'ETH/USDT']:
-            ticker = exchange.fetch_ticker(sym)
-            market_summary.append({"symbol": sym, "price": ticker['last'], "high": ticker['high'], "low": ticker['low'], "volume": ticker['baseVolume']})
-    except Exception as e:
-        print(f"Error Crypto: {e}")
-
-    try:
-        yf_tickers = {"XAUUSD (Gold)": "GC=F", "EURUSD": "EURUSD=X"}
-        for name, symbol in yf_tickers.items():
-            data = yf.Ticker(symbol).history(period="1d", interval="5m")
-            if not data.empty:
-                latest = data.iloc[-1]
-                market_summary.append({"symbol": name, "price": round(latest['Close'], 2), "high": round(latest['High'], 2), "low": round(latest['Low'], 2), "volume": latest['Volume']})
-    except Exception as e:
-        print(f"Error YFinance: {e}")
-
-    return market_summary
 
 async def analyze_and_send(target_chat_id, is_manual=False):
     now_wib = datetime.datetime.now().strftime("%H:%M:%S")
@@ -93,18 +128,18 @@ async def analyze_and_send(target_chat_id, is_manual=False):
         return
 
     for asset in all_data:
-        prompt_input = f"Aset: {asset['symbol']}\nHarga Saat Ini: {asset['price']}\nHigh 5m: {asset['high']}, Low 5m: {asset['low']}\nVolume: {asset['volume']}\nLakukan analisis V4. Berikan keputusan BUY / SELL / WAIT."
         try:
-            formatted_system = SYSTEM_PROMPT_V4.format(ticker_symbol=asset['symbol'], time_stamp=now_wib)
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": formatted_system}, {"role": "user", "content": prompt_input}],
-                temperature=0.2
-            )
-            ai_signal = response.choices[0].message.content
-            if is_manual or "🟢 BUY" in ai_signal or "🔴 SELL" in ai_signal:
-                sent_msg = await bot.send_message(chat_id=target_chat_id, text=f"🚨 **SCALPING SIGNAL ({'MANUAL SCAN' if is_manual else 'AUTO SCAN'})** 🚨\n\n{ai_signal}", parse_mode="Markdown")
-                asyncio.create_task(auto_expire_message(sent_msg, ai_signal))
+            signal_text = generate_technical_signal(asset, now_wib)
+            
+            # Jika scan manual atau jika ada sinyal BUY / SELL otomatis
+            if is_manual or "🟢 BUY" in signal_text or "🔴 SELL" in signal_text:
+                sent_msg = await bot.send_message(
+                    chat_id=target_chat_id, 
+                    text=f"🚨 **SCALPING SIGNAL ({'MANUAL SCAN' if is_manual else 'AUTO SCAN'})** 🚨\n{signal_text}", 
+                    parse_mode="Markdown"
+                )
+                if "🟢 BUY" in signal_text or "🔴 SELL" in signal_text:
+                    asyncio.create_task(auto_expire_message(sent_msg, signal_text))
         except Exception as e:
             print(f"Error processing {asset['symbol']}: {e}")
 
@@ -126,7 +161,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await analyze_and_send(chat_id, is_manual=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🟢 **Status Bot:** ONLINE & RUNNING\n⚡ **Engine:** V4 Institutional Connected", parse_mode="Markdown")
+    await update.message.reply_text("🟢 **Status Bot:** ONLINE & RUNNING\n⚡ **Engine:** Technical Indicator Engine (Pure & Fast)", parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📖 **Panduan Bot Scalper V4:**\n\nBot memindai pasar otomatis tiap 15 menit atau via `/scan`. Sinyal memiliki batas waktu kadaluarsa **3 menit**."
@@ -154,10 +189,6 @@ def run_telegram_bot():
     app.run_polling()
 
 if __name__ == '__main__':
-    # Jalankan Flask di background thread
     t = Thread(target=run_flask)
     t.start()
-    
-    # Jalankan Telegram Bot di main thread
     run_telegram_bot()
-   
