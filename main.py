@@ -1,46 +1,82 @@
-def generate_technical_signal(asset, time_stamp):
-    price = asset['price']
-    ema9 = asset['ema9']
-    ema21 = asset['ema21']
+import os
+import datetime
+import asyncio
+from threading import Thread
+from flask import Flask
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import yfinance as yf
+
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Web Server Sederhana untuk Railway
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "Bot Online!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# Ambil Data Pasar
+def get_market_data():
+    results = []
+    assets = {
+        "BTC/USDT": "BTC-USD",
+        "ETH/USDT": "ETH-USD",
+        "XAUUSD (Gold)": "GC=F",
+        "EURUSD": "EURUSD=X"
+    }
+    for name, symbol in assets.items():
+        try:
+            df = yf.Ticker(symbol).history(period="1d", interval="5m")
+            if not df.empty and len(df) >= 21:
+                ema9 = df['Close'].ewm(span=9, adjust=False).mean().iloc[-1]
+                ema21 = df['Close'].ewm(span=21, adjust=False).mean().iloc[-1]
+                price = df['Close'].iloc[-1]
+                results.append({
+                    "symbol": name,
+                    "price": round(price, 2 if "USD" in name or "Gold" in name else 4),
+                    "ema9": ema9,
+                    "ema21": ema21
+                })
+        except Exception as e:
+            print(f"Error {name}: {e}")
+    return results
+
+# Perintah /status
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🟢 **Bot Aktif & Responsif!**\nServer Railway berjalan normal.", parse_mode="Markdown")
+
+# Perintah /scan
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 *Memindai pasar real-time...*", parse_mode="Markdown")
+    now_time = datetime.datetime.now().strftime("%H:%M:%S")
+    data = get_market_data()
     
-    # 1. Menentukan Tren berdasarkan Posisi EMA
-    if ema9 > ema21:
-        action = "BUY"
-        icon = "🟢"
-        # Menghitung Setup Beli
-        entry_area = f"{price} - {round(price * 0.9995, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)}"
-        tp1 = round(price * 1.003, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
-        tp2 = round(price * 1.006, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
-        sl = round(price * 0.997, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
-    else:
-        action = "SELL"
-        icon = "🔴"
-        # Menghitung Setup Jual
-        entry_area = f"{price} - {round(price * 1.0005, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)}"
-        tp1 = round(price * 0.997, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
-        tp2 = round(price * 0.994, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
-        sl = round(price * 1.003, 2 if 'USD' in asset['symbol'] or 'Gold' in asset['symbol'] else 4)
+    if not data:
+        await update.message.reply_text("❌ Gagal mengambil data pasar.")
+        return
 
-    return f"""
-### {icon} {action} - {asset['symbol']}
-*Waktu Rilis Sinyal: {time_stamp} WIB*
-*Status Sinyal: 🟢 VALID (Kadaluarsa Otomatis dalam 3 Menit)*
+    for item in data:
+        p = item['price']
+        dec = 2 if "USD" in item['symbol'] or "Gold" in item['symbol'] else 4
+        
+        if item['ema9'] > item['ema21']:
+            act, icon = "BUY", "🟢"
+            tp1, sl = round(p * 1.003, dec), round(p * 0.997, dec)
+        else:
+            act, icon = "SELL", "🔴"
+            tp1, sl = round(p * 0.997, dec), round(p * 1.003, dec)
 
-1. ZONA EKSEKUSI & NET RISK-REWARD:
-   • Harga Saat Ini     : {price}
-   • Entry Area         : {entry_area}
-   • Take Profit 1      : {tp1} (Quick Scalp)
-   • Take Profit 2      : {tp2} (Extended Target)
-   • Stop Loss (SL)     : {sl} (Strict Risk)
+        msg = f"### {icon} {act} - {item['symbol']}\n*Waktu: {now_time} WIB*\n• Harga: {p}\n• TP1: {tp1}\n• SL: {sl}"
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
-2. LOT CALCULATOR & RISK MANAGEMENT:
-   • Modal $100 - $500   : Rekomendasi 0.01 - 0.02 Lot / 1-2% Equity
-   • Modal $1.000       : Rekomendasi 0.05 Lot / 5% Equity
-
-3. TEMPORAL WINDOW & TIME INVALIDATION:
-   • Max Hold Duration  : 10 - 25 Menit
-   • Time-Out Action    : "Jika dalam 15 menit TP1 tidak tersentuh, EXIT MANUAL/BEP."
-
-4. AMBANG BATAS BATAL (INVALIDATION RULE):
-   • "Sinyal BATAL jika dibaca >3 menit sejak waktu rilis di atas."
-"""
+def main():
+    # Jalankan Flask di background
+    Thread(target=
