@@ -1,6 +1,8 @@
 import os
 import datetime
 import asyncio
+from threading import Thread
+from flask import Flask
 from dotenv import load_dotenv
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -16,6 +18,17 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 client = OpenAI(api_key=OPENAI_KEY)
 bot = Bot(token=TELEGRAM_TOKEN)
+
+# Mini Web Server untuk menjaga Render Free tetap aktif 24/7
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot Scalper V4 is Alive and Running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app_flask.run(host="0.0.0.0", port=port)
 
 SYSTEM_PROMPT_V4 = """
 Bertindaklah sebagai Senior Institutional Scalper, Order Flow Specialist, & Quantitative Risk Engine Bot.
@@ -73,7 +86,7 @@ def fetch_market_data():
 async def analyze_and_send(target_chat_id, is_manual=False):
     now_wib = datetime.datetime.now().strftime("%H:%M:%S")
     all_data = fetch_market_data()
-
+    
     if not all_data:
         if is_manual:
             await bot.send_message(chat_id=target_chat_id, text="❌ Gagal mengambil data pasar saat ini.")
@@ -123,20 +136,28 @@ async def scheduled_job():
     if CHAT_ID:
         await analyze_and_send(int(CHAT_ID), is_manual=False)
 
-def main():
+def run_telegram_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("help", help_command))
-
-    scheduler = AsyncIOScheduler()
+    
+    scheduler = AsyncIOScheduler(event_loop=loop)
     scheduler.add_job(scheduled_job, 'interval', minutes=15)
     scheduler.start()
-
+    
     print("🚀 Bot Interaktif & Auto-Scanner Siap Berjalan...")
     app.run_polling()
 
 if __name__ == '__main__':
-    main()
-  
+    # Jalankan Flask di background thread
+    t = Thread(target=run_flask)
+    t.start()
+    
+    # Jalankan Telegram Bot di main thread
+    run_telegram_bot()
+   
